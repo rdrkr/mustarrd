@@ -170,6 +170,17 @@ class XtreamClient:
         if self._session and not self._session.closed:
             await self._session.close()
 
+    async def prepare(self) -> None:
+        """Nothing to load: Xtream URLs are built from the credentials alone.
+
+        Present so callers can treat every provider client alike; the M3U
+        client loads its playlist here.
+        """
+
+    async def refresh_url(self, url: str):
+        """Xtream URLs carry the credentials, not a rotating token, so there is nothing to refresh."""
+        return None
+
     def _build_api_url(self, action: str, **params) -> str:
         base = f"{self.server_url}/player_api.php"
         query = {"username": self.username, "password": self.password, "action": action}

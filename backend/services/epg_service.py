@@ -9,6 +9,7 @@ from models import XtreamAccount, EPGProgram, AppSettings
 from services.account_credentials import resolve_account_password_with_migration
 from services.file_namer import FileNamer
 from services.xtream_client import XtreamClient
+from services.provider_client import make_provider_client
 from config import settings as app_settings
 
 
@@ -49,7 +50,7 @@ class EPGService:
             raise Exception(f"Account {account_id} not found")
 
         password = await resolve_account_password_with_migration(session, account)
-        return XtreamClient(account.server_url, account.username, password)
+        return make_provider_client(account, password, XtreamClient)
 
     @staticmethod
     def archive_days_for_channel(channel: dict) -> int:

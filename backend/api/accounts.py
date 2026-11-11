@@ -2,7 +2,7 @@ import asyncio
 import logging
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, delete
 
@@ -17,6 +17,8 @@ from services.account_credentials import (
     resolve_account_password_with_migration,
 )
 from services.xtream_client import XtreamClient, TIMESHIFT_STYLE_AUTO, TIMESHIFT_STYLE_SETTINGS
+from services.provider_client import is_m3u_account, make_provider_client
+from services.m3u_client import PROVIDER_TYPE_XTREAM, PROVIDER_TYPES, clear_playlist_cache
 
 
 router = APIRouter()
@@ -42,15 +44,40 @@ def _validate_catchup_url_style(value: str | None) -> str | None:
     return normalized
 
 
+def _validate_provider_type(value: str | None) -> str | None:
+    """Accept only the provider kinds the app knows, normalised."""
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized not in PROVIDER_TYPES:
+        raise ValueError("provider_type must be one of: " + ", ".join(PROVIDER_TYPES))
+    return normalized
+
+
 class AccountCreate(BaseModel):
     name: str
+    # The Xtream server URL, or for an M3U account the playlist URL.
     server_url: str
-    username: str
-    password: str
+    # Xtream only; an M3U playlist carries its own authorisation.
+    username: str = ""
+    password: str = ""
+    provider_type: str = PROVIDER_TYPE_XTREAM
+    # M3U only: an XMLTV URL overriding the playlist's own url-tvg.
+    epg_url: str | None = None
     guide_offset_hours: int = 0
     catchup_url_style: str = TIMESHIFT_STYLE_AUTO
 
     _check_style = field_validator("catchup_url_style")(_validate_catchup_url_style)
+    _check_provider = field_validator("provider_type")(_validate_provider_type)
+
+    @model_validator(mode="after")
+    def _require_credentials(self):
+        """An Xtream login needs a username and password; a playlist needs neither."""
+        if self.provider_type == PROVIDER_TYPE_XTREAM and not (self.username and self.password):
+            raise ValueError("Xtream accounts need a username and password")
+        if not self.server_url.strip().lower().startswith(("http://", "https://")):
+            raise ValueError("server_url must be an http(s) URL")
+        return self
 
 
 class AccountUpdate(BaseModel):
@@ -58,11 +85,14 @@ class AccountUpdate(BaseModel):
     server_url: str | None = None
     username: str | None = None
     password: str | None = None
+    provider_type: str | None = None
+    epg_url: str | None = None
     is_active: bool | None = None
     guide_offset_hours: int | None = None
     catchup_url_style: str | None = None
 
     _check_style = field_validator("catchup_url_style")(_validate_catchup_url_style)
+    _check_provider = field_validator("provider_type")(_validate_provider_type)
 
 
 @router.get("")
@@ -101,9 +131,9 @@ async def create_account(
     _admin: None = Depends(require_admin),
     session: AsyncSession = Depends(get_session)
 ):
-    """Create a new Xtream account (validates connection)."""
+    """Create a new Xtream or M3U account (validates connection)."""
     # Test connection first
-    client = XtreamClient(account.server_url, account.username, account.password)
+    client = make_provider_client(account, account.password, XtreamClient)
     try:
         auth_data = await client.authenticate()
     except Exception:
@@ -135,7 +165,9 @@ async def create_account(
         server_url=account.server_url,
         username=account.username,
         password="",
-        password_encrypted=encrypt_account_password(account.password),
+        password_encrypted=encrypt_account_password(account.password or ""),
+        provider_type=account.provider_type,
+        epg_url=(account.epg_url or "").strip() or None,
         max_connections=user_info.get("max_connections"),
         active_connections=user_info.get("active_cons"),
         expiration_date=exp_date,
@@ -209,6 +241,8 @@ async def update_account(
 
     await session.commit()
     await session.refresh(account)
+    # A changed playlist URL must not be answered from the old one's cache.
+    clear_playlist_cache()
 
     return account.to_dict()
 
@@ -295,10 +329,13 @@ async def test_account(
     try:
         password = await resolve_account_password_with_migration(session, account)
     except ValueError:
-        logger.exception("Account credentials missing or invalid account_id=%s", account_id)
-        raise HTTPException(status_code=400, detail="Account credentials are not configured")
+        if is_m3u_account(account):
+            password = ""
+        else:
+            logger.exception("Account credentials missing or invalid account_id=%s", account_id)
+            raise HTTPException(status_code=400, detail="Account credentials are not configured")
 
-    client = XtreamClient(account.server_url, account.username, password)
+    client = make_provider_client(account, password, XtreamClient)
     try:
         auth_data = await client.authenticate()
 

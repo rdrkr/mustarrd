@@ -33,6 +33,7 @@ from services.hls_streamer import (
 from services.preview_budget import preview_budget
 from services.vod_preview_source import loopback_source_url, vod_preview_source_relay
 from services.xtream_client import XtreamClient
+from services.provider_client import make_provider_client
 from services.vod_service import build_movie_download, build_episode_download
 from services.download_manager import download_manager
 
@@ -102,7 +103,7 @@ class SeriesDownloadRequest(BaseModel):
 
 async def _get_client(session: AsyncSession, account: XtreamAccount) -> XtreamClient:
     password = await resolve_account_password_with_migration(session, account)
-    return XtreamClient(account.server_url, account.username, password)
+    return make_provider_client(account, password, XtreamClient)
 
 
 async def _get_account(session: AsyncSession, account_id: int) -> XtreamAccount:

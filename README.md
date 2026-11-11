@@ -30,7 +30,8 @@ Mustarrd connects to your IPTV provider and lets you download past programs. Thi
 
 ## Requirements
 
-- An IPTV subscription with **catchup / timeshift support** (must use the Xtream Codes protocol)
+- An IPTV subscription with **catchup / timeshift support**, given either as an **Xtream Codes** login (server, username, password) or as an **M3U playlist URL**
+  - For an M3U playlist, channels with an archive are the ones the playlist marks with `catchup-days`, `timeshift` or `tvg-rec`. Catchup links follow the playlist's `catchup` / `catchup-source` attributes when it gives them; otherwise Flussonic-style streams (`…/index.m3u8`) use Flussonic's archive form and anything else gets `?utc=…&lutc=…`. HLS archives are recorded segment by segment into one `.ts` file. The guide comes from the playlist's `url-tvg`, or from an EPG URL you set on the account. Playlists carry no VOD.
 - **Docker:** recommended install method, everything is bundled
 
 > Not sure if your provider supports catchup? Check if they give you a "catchup days" value or mention timeshift in their plan details.
@@ -73,9 +74,9 @@ Then open **http://localhost:4177** in your browser.
 
 1. Open **http://localhost:4177**
 2. You'll be prompted to **set an admin username and password**.
-3. Enter your IPTV provider details:
-   - Server URL (e.g. `https://your-provider.com`)
-   - Username and password (from your provider)
+3. Enter your IPTV provider details, as either:
+   - **Xtream Codes**: server URL (e.g. `https://your-provider.com`), username and password
+   - **M3U playlist**: the playlist URL, and optionally an XMLTV guide URL
 4. Optional - link to your Plex install to allow request access to your plex users and automatic library scans on file completion.
 5. Mustarrd will sync your provider's channel list and program guide to use in "Search All TV" mode. This takes a minute or two on first load. Individual channels will load instantly if you select one.
 6. Go to **Browse**, pick a channel, and start downloading or search all.

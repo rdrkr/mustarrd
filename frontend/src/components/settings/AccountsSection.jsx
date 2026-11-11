@@ -16,6 +16,7 @@ import {
   Alert,
   NumberInput,
   Select,
+  SegmentedControl,
   Box,
   Tooltip,
 } from '@mantine/core'
@@ -80,21 +81,51 @@ export function catchupStyleLabel(account) {
   return 'Automatic — style not yet determined'
 }
 
+export const PROVIDER_TYPE_OPTIONS = [
+  { value: 'xtream', label: 'Xtream Codes' },
+  { value: 'm3u', label: 'M3U playlist' },
+]
+
+/**
+ * What an account card shows for where the account connects. A playlist URL
+ * usually embeds the provider's access token, so only its host is shown.
+ */
+export function accountSourceLabel(account) {
+  if (account?.provider_type !== 'm3u') return account?.server_url || ''
+  try {
+    return `M3U playlist · ${new URL(account.server_url).host}`
+  } catch {
+    return 'M3U playlist'
+  }
+}
+
 function AccountForm({ account, onSubmit, onCancel, isLoading }) {
   const [formData, setFormData] = useState({
     name: account?.name || '',
+    provider_type: account?.provider_type || 'xtream',
     server_url: account?.server_url || '',
     username: account?.username || '',
     password: account?.password || '',
+    epg_url: account?.epg_url || '',
     guide_offset_hours: account?.guide_offset_hours || 0,
     catchup_url_style: account?.catchup_url_style || 'auto',
   })
+  const isM3U = formData.provider_type === 'm3u'
 
   const handleSubmit = (e) => {
     e.preventDefault()
     const payload = { ...formData }
-    if (account && !payload.password) {
+    if (isM3U) {
+      // A playlist carries its own authorisation and its own catchup form.
+      delete payload.username
       delete payload.password
+      delete payload.catchup_url_style
+      payload.epg_url = payload.epg_url.trim() || null
+    } else {
+      delete payload.epg_url
+      if (account && !payload.password) {
+        delete payload.password
+      }
     }
     onSubmit(payload)
   }
@@ -109,30 +140,58 @@ function AccountForm({ account, onSubmit, onCancel, isLoading }) {
           value={formData.name}
           onChange={(e) => setFormData({ ...formData, name: e.target.value })}
         />
+        <SegmentedControl
+          aria-label="Provider type"
+          data={PROVIDER_TYPE_OPTIONS}
+          value={formData.provider_type}
+          onChange={(value) => setFormData({ ...formData, provider_type: value })}
+        />
         <TextInput
-          label="Server URL"
-          placeholder="https://provider.example.com"
+          label={isM3U ? 'Playlist URL' : 'Server URL'}
+          description={isM3U ? 'The M3U link your provider gave you. Channels with an archive (catchup-days, timeshift) can be recorded.' : undefined}
+          placeholder={isM3U ? 'https://provider.example.com/playlist.m3u8' : 'https://provider.example.com'}
           required
           autoCapitalize="none"
           autoCorrect="off"
           spellCheck={false}
           inputMode="url"
           value={formData.server_url}
-          onChange={(e) => setFormData({ ...formData, server_url: e.target.value.toLowerCase() })}
+          onChange={(e) => setFormData({
+            ...formData,
+            // Playlist URLs often embed a case-sensitive token; only an Xtream
+            // server URL is safe to lowercase.
+            server_url: isM3U ? e.target.value.trim() : e.target.value.toLowerCase(),
+          })}
         />
-        <TextInput
-          label="Username"
-          required
-          value={formData.username}
-          onChange={(e) => setFormData({ ...formData, username: e.target.value })}
-        />
-        <TextInput
-          label="Password"
-          type="password"
-          required={!account}
-          value={formData.password}
-          onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-        />
+        {isM3U ? (
+          <TextInput
+            label="EPG URL (optional)"
+            description="XMLTV guide to use instead of the one the playlist names (url-tvg)."
+            placeholder="https://epg.example.com/guide.xml.gz"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
+            inputMode="url"
+            value={formData.epg_url}
+            onChange={(e) => setFormData({ ...formData, epg_url: e.target.value })}
+          />
+        ) : (
+          <>
+            <TextInput
+              label="Username"
+              required
+              value={formData.username}
+              onChange={(e) => setFormData({ ...formData, username: e.target.value })}
+            />
+            <TextInput
+              label="Password"
+              type="password"
+              required={!account}
+              value={formData.password}
+              onChange={(e) => setFormData({ ...formData, password: e.target.value })}
+            />
+          </>
+        )}
         <NumberInput
           label="Guide Alignment Offset (hours)"
           description="Shifts the displayed guide times for this account only. Downloads and schedules still target the same underlying program record."
@@ -146,7 +205,7 @@ function AccountForm({ account, onSubmit, onCancel, isLoading }) {
               guide_offset_hours: typeof value === 'number' ? value : 0,
             })}
         />
-        <Select
+        {!isM3U && <Select
           label="Catchup URL style"
           description="Most providers work on Automatic. Only change this if your recordings keep failing and your provider needs one specific link format."
           data={CATCHUP_URL_STYLE_OPTIONS}
@@ -157,7 +216,7 @@ function AccountForm({ account, onSubmit, onCancel, isLoading }) {
               ...formData,
               catchup_url_style: value || 'auto',
             })}
-        />
+        />}
         <Group justify="flex-end" mt="md">
           <Button variant="subtle" onClick={onCancel}>
             Cancel
@@ -222,12 +281,14 @@ function AccountCard({ account, isDefault, onSetDefault, onEdit, onDelete, onTes
         </Menu>
       </Group>
 
-      <Text size="xs" c="dimmed" ff="monospace" truncate title={account.server_url}>
-        {account.server_url}
+      <Text size="xs" c="dimmed" ff="monospace" truncate title={accountSourceLabel(account)}>
+        {accountSourceLabel(account)}
       </Text>
-      <Text size="xs" c="dimmed" mt={2}>
-        User: {account.username}
-      </Text>
+      {account.provider_type !== 'm3u' && (
+        <Text size="xs" c="dimmed" mt={2}>
+          User: {account.username}
+        </Text>
+      )}
 
       <Group mt="md" gap={6}>
         {account.catchup_channel_count != null && (
@@ -240,9 +301,11 @@ function AccountCard({ account, isDefault, onSetDefault, onEdit, onDelete, onTes
             {account.vod_available ? 'VOD ✓' : 'VOD ✗'}
           </Badge>
         )}
-        <Badge variant="light" size="sm" color="indigo">
-          {catchupStyleLabel(account)}
-        </Badge>
+        {account.provider_type !== 'm3u' && (
+          <Badge variant="light" size="sm" color="indigo">
+            {catchupStyleLabel(account)}
+          </Badge>
+        )}
         {Number(account?.guide_offset_hours || 0) !== 0 && (
           <Badge variant="light" size="sm" color="grape">
             {getGuideOffsetLabel(account)}

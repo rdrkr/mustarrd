@@ -12,6 +12,7 @@ import {
   MultiSelect,
   PasswordInput,
   Radio,
+  SegmentedControl,
   Select,
   Stack,
   Switch,
@@ -60,10 +61,13 @@ export default function Onboarding() {
   const [plexLibraries, setPlexLibraries] = useState([])
   const [accountForm, setAccountForm] = useState({
     name: '',
+    provider_type: 'xtream',
     server_url: '',
     username: '',
     password: '',
+    epg_url: '',
   })
+  const isM3U = accountForm.provider_type === 'm3u'
 
   const { data: status, isLoading, error } = useQuery({
     queryKey: ['onboarding', 'status'],
@@ -86,7 +90,7 @@ export default function Onboarding() {
       setCurrentStep(1)
       notifications.show({
         title: 'Account Added',
-        message: 'Xtream account connected successfully.',
+        message: 'Provider account connected successfully.',
         color: 'green',
       })
     },
@@ -331,7 +335,16 @@ export default function Onboarding() {
 
   const handleCreateAccount = (e) => {
     e.preventDefault()
-    createAccountMutation.mutate(accountForm)
+    const payload = { ...accountForm }
+    if (isM3U) {
+      // A playlist carries its own authorisation.
+      delete payload.username
+      delete payload.password
+      payload.epg_url = payload.epg_url.trim() || null
+    } else {
+      delete payload.epg_url
+    }
+    createAccountMutation.mutate(payload)
   }
 
   const handleSaveProcessingAndComskip = () => {
@@ -450,9 +463,18 @@ export default function Onboarding() {
                   value={accountForm.name}
                   onChange={(e) => setAccountForm((prev) => ({ ...prev, name: e.target.value }))}
                 />
+                <SegmentedControl
+                  aria-label="Provider type"
+                  data={[
+                    { value: 'xtream', label: 'Xtream Codes' },
+                    { value: 'm3u', label: 'M3U playlist' },
+                  ]}
+                  value={accountForm.provider_type}
+                  onChange={(value) => setAccountForm((prev) => ({ ...prev, provider_type: value }))}
+                />
                 <TextInput
-                  label="Server URL"
-                  placeholder="https://provider.example.com"
+                  label={isM3U ? 'Playlist URL' : 'Server URL'}
+                  placeholder={isM3U ? 'https://provider.example.com/playlist.m3u8' : 'https://provider.example.com'}
                   size={isMobile ? 'md' : 'sm'}
                   required
                   autoCapitalize="none"
@@ -460,22 +482,42 @@ export default function Onboarding() {
                   spellCheck={false}
                   inputMode="url"
                   value={accountForm.server_url}
-                  onChange={(e) => setAccountForm((prev) => ({ ...prev, server_url: e.target.value.toLowerCase() }))}
+                  onChange={(e) => {
+                    // Playlist URLs often embed a case-sensitive token.
+                    const value = isM3U ? e.target.value.trim() : e.target.value.toLowerCase()
+                    setAccountForm((prev) => ({ ...prev, server_url: value }))
+                  }}
                 />
-                <TextInput
-                  label="Username"
-                  size={isMobile ? 'md' : 'sm'}
-                  required
-                  value={accountForm.username}
-                  onChange={(e) => setAccountForm((prev) => ({ ...prev, username: e.target.value }))}
-                />
-                <PasswordInput
-                  label="Password"
-                  size={isMobile ? 'md' : 'sm'}
-                  required
-                  value={accountForm.password}
-                  onChange={(e) => setAccountForm((prev) => ({ ...prev, password: e.target.value }))}
-                />
+                {isM3U ? (
+                  <TextInput
+                    label="EPG URL (optional)"
+                    description="XMLTV guide to use instead of the one the playlist names."
+                    size={isMobile ? 'md' : 'sm'}
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck={false}
+                    inputMode="url"
+                    value={accountForm.epg_url}
+                    onChange={(e) => setAccountForm((prev) => ({ ...prev, epg_url: e.target.value }))}
+                  />
+                ) : (
+                  <>
+                    <TextInput
+                      label="Username"
+                      size={isMobile ? 'md' : 'sm'}
+                      required
+                      value={accountForm.username}
+                      onChange={(e) => setAccountForm((prev) => ({ ...prev, username: e.target.value }))}
+                    />
+                    <PasswordInput
+                      label="Password"
+                      size={isMobile ? 'md' : 'sm'}
+                      required
+                      value={accountForm.password}
+                      onChange={(e) => setAccountForm((prev) => ({ ...prev, password: e.target.value }))}
+                    />
+                  </>
+                )}
                 <Box
                   mt="sm"
                   style={{

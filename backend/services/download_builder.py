@@ -12,6 +12,7 @@ from services.account_credentials import resolve_account_password_with_migration
 from services.epg_service import epg_service
 from services.output_path import output_path as output_path_builder
 from services.xtream_client import XtreamClient, resolve_timeshift_style
+from services.provider_client import make_provider_client
 
 
 def _coerce_ts(value) -> int:
@@ -214,7 +215,13 @@ async def build_download_from_program(
         padded_url_start = fallback_url_start - timedelta(minutes=pre_padding)
 
     password = await resolve_account_password_with_migration(session, account)
-    client = XtreamClient(account.server_url, account.username, password)
+    client = make_provider_client(account, password, XtreamClient)
+    try:
+        # An M3U client needs its playlist to build URLs; an Xtream one does
+        # nothing here. The URL builders below are synchronous and need no session.
+        await client.prepare()
+    finally:
+        await client.close()
     source_url = client.build_timeshift_url(
         channel_id,
         padded_url_start,

@@ -3,7 +3,7 @@ import { fireEvent, screen, waitFor } from '@testing-library/react'
 
 import { renderWithQuery } from '../../test/renderWithProviders'
 import { accountsApi, epgApi, settingsApi } from '../../api'
-import AccountsSection, { catchupStyleLabel } from './AccountsSection'
+import AccountsSection, { accountSourceLabel, catchupStyleLabel } from './AccountsSection'
 
 vi.mock('../../api', () => ({
   accountsApi: {
@@ -125,5 +125,60 @@ describe('AccountsSection', () => {
 
     const select = await screen.findByRole('textbox', { name: 'Catchup URL style' })
     expect(select).toHaveValue('Automatic')
+  })
+
+  it('shows only the host of an M3U playlist, never its token, and no username', async () => {
+    mockAccounts({
+      provider_type: 'm3u',
+      server_url: 'https://hls.example/pl/61/secrettoken/playlist.m3u8',
+      username: '',
+    })
+
+    renderWithQuery(<AccountsSection />)
+
+    expect(await screen.findByText('M3U playlist · hls.example')).toBeInTheDocument()
+    expect(screen.queryByText(/secrettoken/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/User:/)).not.toBeInTheDocument()
+    expect(screen.queryByText(/Automatic — /)).not.toBeInTheDocument()
+  })
+
+  it('creates an M3U account from the playlist URL alone, keeping its case', async () => {
+    mockAccounts()
+    accountsApi.create.mockResolvedValue({})
+
+    renderWithQuery(<AccountsSection />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Add Account' }))
+    fireEvent.click(await screen.findByText('M3U playlist'))
+
+    expect(screen.queryByRole('textbox', { name: 'Username' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('textbox', { name: 'Catchup URL style' })).not.toBeInTheDocument()
+
+    fireEvent.change(screen.getByRole('textbox', { name: 'Account Name' }), { target: { value: 'TV Team' } })
+    fireEvent.change(screen.getByRole('textbox', { name: 'Playlist URL' }), {
+      target: { value: 'https://hls.example/pl/61/AbC/playlist.m3u8' },
+    })
+    fireEvent.click(screen.getAllByRole('button', { name: 'Add Account' }).at(-1))
+
+    await waitFor(() => {
+      expect(accountsApi.create).toHaveBeenCalled()
+    })
+    expect(accountsApi.create.mock.calls[0][0]).toEqual({
+      name: 'TV Team',
+      provider_type: 'm3u',
+      server_url: 'https://hls.example/pl/61/AbC/playlist.m3u8',
+      epg_url: null,
+      guide_offset_hours: 0,
+    })
+  })
+})
+
+describe('accountSourceLabel', () => {
+  it('shows the Xtream server URL as is', () => {
+    expect(accountSourceLabel({ server_url: 'https://x.example' })).toBe('https://x.example')
+  })
+
+  it('falls back when an M3U URL does not parse', () => {
+    expect(accountSourceLabel({ provider_type: 'm3u', server_url: 'not a url' })).toBe('M3U playlist')
   })
 })

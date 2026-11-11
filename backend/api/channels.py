@@ -35,6 +35,8 @@ from services.account_credentials import resolve_account_password_with_migration
 from services.logo_cache import logo_cache
 from services.preview_budget import PREVIEW_MAX_CONCURRENT, preview_budget
 from services.xtream_client import XtreamClient, resolve_timeshift_style
+from services.provider_client import make_provider_client
+from services.hls_source import HLSStatusError, is_hls_url, iter_hls
 
 
 router = APIRouter()
@@ -72,7 +74,13 @@ async def _resolve_preview_stream_url(
         raise HTTPException(status_code=404, detail="Account not found")
 
     password = await resolve_account_password_with_migration(session, account)
-    client = XtreamClient(account.server_url, account.username, password)
+    client = make_provider_client(account, password, XtreamClient)
+    try:
+        # An M3U client needs its playlist to build URLs; an Xtream one does
+        # nothing here. The URL builders below are synchronous and need no session.
+        await client.prepare()
+    finally:
+        await client.close()
 
     if mode != "catchup":
         return client.build_stream_url(channel_id, "ts")
@@ -131,12 +139,38 @@ class _ProviderStream:
 
     async def open(self):
         self._http_session = aiohttp.ClientSession(timeout=PREVIEW_TIMEOUT)
+        if is_hls_url(self._url):
+            return await self._open_hls()
         self._response = await self._http_session.get(self._url)
         if self._response.status != 200:
             status = self._response.status
             await self.close()
             raise HLSStartError(_provider_refused(status))
         return self._response.content.iter_chunked(PREVIEW_CHUNK_SIZE)
+
+    async def _open_hls(self):
+        """Present an HLS source (an M3U provider) as one MPEG-TS byte stream.
+
+        The first chunk is read here, so a provider that refuses the playlist
+        is reported as a refused preview, as a refused .ts URL would be,
+        rather than as an FFmpeg failure later on.
+        """
+        stream = iter_hls(self._url, http=self._http_session)
+        try:
+            first = await stream.__anext__()
+        except HLSStatusError as refusal:
+            await self.close()
+            raise HLSStartError(_provider_refused(refusal.status)) from None
+        except StopAsyncIteration:
+            await self.close()
+            raise HLSStartError("Provider returned an empty stream") from None
+
+        async def chained():
+            yield first
+            async for chunk in stream:
+                yield chunk
+
+        return chained()
 
     async def close(self) -> None:
         response, self._response = self._response, None
@@ -223,7 +257,7 @@ async def get_channels(
         starred_ids = set(starred_result.scalars().all())
 
         password = await resolve_account_password_with_migration(session, account)
-        client = XtreamClient(account.server_url, account.username, password)
+        client = make_provider_client(account, password, XtreamClient)
         try:
             channels = await client.get_live_streams(category_id)
 
@@ -611,7 +645,7 @@ async def get_channel_info(
 
     try:
         password = await resolve_account_password_with_migration(session, account)
-        client = XtreamClient(account.server_url, account.username, password)
+        client = make_provider_client(account, password, XtreamClient)
         try:
             channels = await client.get_live_streams()
             channel = next((ch for ch in channels if str(ch.get("stream_id")) == channel_id), None)

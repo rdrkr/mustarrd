@@ -29,6 +29,8 @@ from services.recording_events import (
     RecordingEvent,
     recording_events,
 )
+from services.hls_source import HLSProgress, HLSStatusError, is_hls_url, iter_hls
+from services.provider_client import is_m3u_account, make_provider_client
 from services.xtream_client import (
     other_timeshift_style,
     restyle_timeshift_url,
@@ -2420,6 +2422,8 @@ class DownloadManager:
         restyling would throw away the partial file for nothing.
         """
         url = download.source_url
+        if is_hls_url(url):
+            return await self._download_hls_stream(download, download_id, session)
         style = timeshift_style_of_url(url)
         if style is None:
             return await self._download_file(
@@ -2466,6 +2470,126 @@ class DownloadManager:
         if probing and account.catchup_url_style_resolved != style:
             account.catchup_url_style_resolved = style
             await session.commit()
+        return downloaded
+
+    async def _download_hls_stream(
+        self,
+        download: Download,
+        download_id: int,
+        session: AsyncSession,
+    ) -> int:
+        """Fetch an HLS recording (an M3U provider's archive) as one MPEG-TS file.
+
+        Segments are appended in order, which is a valid MPEG-TS file, so the
+        post-processing that follows sees exactly what an Xtream ``.ts``
+        download would have produced. A transfer is never resumed part-way:
+        segment boundaries do not line up with byte offsets on disk, so a
+        retry or a recovered download starts the file again.
+
+        Playlist providers sign every URL with a token that rotates. A
+        recording queued long ago may carry a token that has since expired, so
+        when the provider refuses the playlist with a client error, the
+        account's playlist is fetched afresh, the URL is given its current
+        token, and the transfer is tried once more.
+        """
+        url = download.source_url
+        refreshed = False
+        attempt = 0
+        while True:
+            try:
+                return await self._download_hls_once(url, download.output_path, download_id, session)
+            except HLSStatusError as refusal:
+                if refreshed or not 400 <= refusal.status < 500:
+                    raise ProviderStatusError(refusal.status, refusal.reason) from None
+                refreshed = True
+                account = await self._load_download_account(session, download.account_id)
+                new_url = None
+                if account is not None and is_m3u_account(account):
+                    client = make_provider_client(account)
+                    try:
+                        new_url = await client.refresh_url(url)
+                    except Exception as exc:
+                        logger.warning("Playlist refresh failed for download %s: %s", download_id, exc)
+                    finally:
+                        await client.close()
+                if not new_url or new_url == url:
+                    raise ProviderStatusError(refusal.status, refusal.reason) from None
+                await self._broadcast_log(
+                    download_id,
+                    f"Provider refused the stream ({refusal}); retrying with a fresh playlist token.",
+                    level="warning",
+                )
+                url = new_url
+                download.source_url = new_url
+                await session.commit()
+            except Exception as exc:
+                if not _is_transient_network_error(exc) or attempt >= TRANSIENT_RETRY_LIMIT:
+                    raise
+                attempt += 1
+                delay = TRANSIENT_RETRY_BACKOFF_SECONDS * attempt
+                await self._broadcast_log(
+                    download_id,
+                    f"Network error during download: {type(exc).__name__}: {exc}. "
+                    f"Restarting in {delay:.0f}s (attempt {attempt}/{TRANSIENT_RETRY_LIMIT}).",
+                    level="warning",
+                )
+                await asyncio.sleep(delay)
+
+    async def _download_hls_once(
+        self,
+        url: str,
+        output_path: str,
+        download_id: int,
+        session: AsyncSession,
+    ) -> int:
+        """Stream every segment of an HLS playlist into ``output_path``. Returns bytes written.
+
+        Progress is the share of the playlist's media seconds read, which is
+        known as soon as the playlist is (an archive playlist lists the whole
+        window up front). The byte size is estimated from it for the UI.
+        """
+        await self._broadcast_log(download_id, "HLS stream: reading segments from the provider playlist.")
+        await self._preflight_disk_space(session, output_path, 0, 0, download_id)
+        progress = HLSProgress()
+        downloaded = 0
+        last_progress = -1.0
+        async with aiofiles.open(output_path, "wb") as f:
+            async for chunk in iter_hls(
+                url,
+                progress=progress,
+                is_cancelled=lambda: download_id in self._cancelled,
+            ):
+                await f.write(chunk)
+                downloaded += len(chunk)
+                percent = round(progress.fraction * 100, 1)
+                if percent - last_progress < 1 and progress.fraction < 1:
+                    continue
+                last_progress = percent
+                estimated = int(downloaded / progress.fraction) if progress.fraction else 0
+                await session.execute(
+                    update(Download)
+                    .where(Download.id == download_id)
+                    .values(progress=percent, downloaded_bytes=downloaded, file_size=estimated)
+                )
+                await session.commit()
+                await self._broadcast_progress(
+                    download_id,
+                    percent,
+                    DownloadStatus.DOWNLOADING.value,
+                    downloaded_bytes=downloaded,
+                    file_size=estimated,
+                    download_progress=percent,
+                )
+        await session.execute(
+            update(Download)
+            .where(Download.id == download_id)
+            .values(progress=100.0, downloaded_bytes=downloaded, file_size=downloaded)
+        )
+        await session.commit()
+        await self._broadcast_log(
+            download_id,
+            f"Download bytes written: {downloaded:,} ({progress.segments_done} segments).",
+        )
         return downloaded
 
     async def _download_file(

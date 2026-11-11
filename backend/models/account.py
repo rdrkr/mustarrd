@@ -12,6 +12,11 @@ class XtreamAccount(Base):
     username: Mapped[str] = mapped_column(String(255))
     password: Mapped[str] = mapped_column(String(255))
     password_encrypted: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    # "xtream" (server_url + username + password) or "m3u" (server_url is the
+    # playlist URL; username and password are unused).
+    provider_type: Mapped[str] = mapped_column(String(16), default="xtream")
+    # XMLTV guide URL overriding the playlist's own url-tvg (M3U accounts only).
+    epg_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     catchup_days: Mapped[int] = mapped_column(Integer, default=7)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
@@ -44,6 +49,8 @@ class XtreamAccount(Base):
             "name": self.name,
             "server_url": self.server_url,
             "username": self.username,
+            "provider_type": self.provider_type or "xtream",
+            "epg_url": self.epg_url,
             "is_active": self.is_active,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "last_used": self.last_used.isoformat() if self.last_used else None,

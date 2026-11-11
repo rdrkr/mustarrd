@@ -72,6 +72,12 @@ async def _apply_lightweight_migrations(conn) -> None:
                 text(f"ALTER TABLE epg_programs ADD COLUMN {column_name} {column_spec}")
             )
 
+    if not await _column_exists(conn, "xtream_accounts", "provider_type"):
+        await conn.execute(
+            text("ALTER TABLE xtream_accounts ADD COLUMN provider_type VARCHAR(16) DEFAULT 'xtream'")
+        )
+    if not await _column_exists(conn, "xtream_accounts", "epg_url"):
+        await conn.execute(text("ALTER TABLE xtream_accounts ADD COLUMN epg_url VARCHAR(1000)"))
     if not await _column_exists(conn, "xtream_accounts", "catchup_resolution_mode"):
         await conn.execute(
             text("ALTER TABLE xtream_accounts ADD COLUMN catchup_resolution_mode VARCHAR(32) DEFAULT 'auto'")
