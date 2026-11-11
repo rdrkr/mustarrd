@@ -262,6 +262,17 @@ class XtreamClient:
                 raise Exception(f"Failed to get XMLTV: HTTP {response.status}")
             return await response.read()
 
+    async def download_xmltv(self, path: str) -> None:
+        """Stream the XMLTV guide to a file, never holding it whole in memory."""
+        url = f"{self.server_url}/xmltv.php?{urlencode({'username': self.username, 'password': self.password})}"
+        session = await self._get_session()
+        async with session.get(url, timeout=XMLTV_TIMEOUT) as response:
+            if response.status != 200:
+                raise Exception(f"Failed to get XMLTV: HTTP {response.status}")
+            with open(path, "wb") as f:
+                async for chunk in response.content.iter_chunked(1024 * 1024):
+                    f.write(chunk)
+
     async def get_vod_categories(self) -> list:
         """Get VOD (movies) categories."""
         url = self._build_api_url("get_vod_categories")

@@ -3,11 +3,14 @@ import base64
 import gzip
 import io
 import logging
+import os
 import re
+import shutil
+import tempfile
 import unicodedata
 import zlib
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Iterable, Optional
+from typing import Dict, Iterable, Optional, Union
 from xml.etree.ElementTree import Element
 
 from defusedxml import ElementTree as ET
@@ -25,6 +28,12 @@ from services.epg_service import epg_service
 from services.log_stream import backend_log_stream
 
 logger = logging.getLogger(__name__)
+
+
+def _write_bytes(path: str, data: bytes) -> None:
+    """Write a whole buffer to a file (run off the event loop)."""
+    with open(path, "wb") as f:
+        f.write(data)
 
 
 def _program_insert_stmt():
@@ -78,6 +87,141 @@ def _sanitize_html_entities(data: bytes) -> bytes:
         return b"&amp;" + name + b";"
     data = _HTML_ENTITY_RE.sub(_replace, data)
     return _BARE_AMP_RE.sub(b"&amp;", data)
+
+
+# A guide is either the document itself (bytes) or a file holding it that
+# _prepare_xmltv_file() has already decompressed and sanitised.
+XMLTVSource = Union[bytes, str]
+
+# Read size for the streaming pass. Pieces are cut just after a ">", which no
+# entity, "<programme" or "<![CDATA[" contains, so cutting there never splits
+# anything the sanitiser or the counter has to see whole.
+_STREAM_CHUNK = 1024 * 1024
+_CDATA_OPEN = b"<![CDATA["
+_CDATA_CLOSE = b"]]>"
+
+
+def _open_xmltv(source: XMLTVSource):
+    """A binary file object over a guide, sanitised for expat either way."""
+    if isinstance(source, (bytes, bytearray)):
+        return io.BytesIO(_sanitize_html_entities(bytes(source)))
+    return open(source, "rb")
+
+
+def _open_decompressed(path: str):
+    """Open a downloaded guide, transparently gunzipping or inflating it.
+
+    Mirrors EPGIngestManager._maybe_decompress for a file: gzip by its magic
+    bytes, then zlib-framed or raw deflate if the first chunk inflates, else
+    the file as it is.
+    """
+    with open(path, "rb") as probe:
+        head = probe.read(64 * 1024)
+    if head[:2] == b"\x1f\x8b":
+        return gzip.open(path, "rb")
+    for wbits in (15, -15):
+        try:
+            zlib.decompressobj(wbits).decompress(head)
+        except zlib.error:
+            continue
+        return _InflatingReader(path, wbits)
+    return open(path, "rb")
+
+
+class _InflatingReader(io.RawIOBase):
+    """A read-only stream that inflates a zlib or raw-deflate file as it is read."""
+
+    def __init__(self, path: str, wbits: int):
+        self._file = open(path, "rb")
+        self._inflater = zlib.decompressobj(wbits)
+        self._buffer = b""
+
+    def readable(self) -> bool:
+        return True
+
+    def read(self, size: int = -1) -> bytes:
+        while size < 0 or len(self._buffer) < size:
+            chunk = self._file.read(_STREAM_CHUNK)
+            if not chunk:
+                self._buffer += self._inflater.flush()
+                break
+            self._buffer += self._inflater.decompress(chunk)
+        if size < 0:
+            out, self._buffer = self._buffer, b""
+        else:
+            out, self._buffer = self._buffer[:size], self._buffer[size:]
+        return out
+
+    def close(self) -> None:
+        self._file.close()
+        super().close()
+
+
+def _count_programmes(piece: bytes, in_cdata: bool) -> tuple[int, bool]:
+    """Count "<programme" outside CDATA in one piece, carrying the CDATA state across pieces."""
+    count = 0
+    pos = 0
+    while pos < len(piece):
+        if in_cdata:
+            end = piece.find(_CDATA_CLOSE, pos)
+            if end < 0:
+                return count, True
+            pos = end + len(_CDATA_CLOSE)
+            in_cdata = False
+        else:
+            start = piece.find(_CDATA_OPEN, pos)
+            segment = piece[pos:] if start < 0 else piece[pos:start]
+            count += segment.count(b"<programme")
+            if start < 0:
+                return count, False
+            pos = start + len(_CDATA_OPEN)
+            in_cdata = True
+    return count, in_cdata
+
+
+def _prepare_xmltv_file(raw_path: str, out_path: str) -> Optional[tuple[int, int]]:
+    """Decompress and sanitise a downloaded guide into out_path, one piece at a time.
+
+    This is what keeps a large guide out of memory: a 7-day feed can be well
+    over half a gigabyte of XML, and holding it (let alone the copies that
+    decompressing, CDATA-stripping and sanitising each made) got the process
+    killed. Here only one piece is ever held.
+
+    Returns:
+        (bytes written, programme tags outside CDATA), or None when the guide is
+        empty or its compression is corrupt - the same outcomes
+        _maybe_decompress reports as b"".
+    """
+    written = 0
+    programmes = 0
+    in_cdata = False
+    carry = b""
+    try:
+        with _open_decompressed(raw_path) as src, open(out_path, "wb") as dst:
+            while True:
+                chunk = src.read(_STREAM_CHUNK)
+                data = carry + chunk
+                if not chunk:
+                    piece, carry = data, b""
+                else:
+                    cut = data.rfind(b">") + 1
+                    if cut == 0:
+                        carry = data
+                        continue
+                    piece, carry = data[:cut], data[cut:]
+                if piece:
+                    piece = _sanitize_html_entities(piece)
+                    found, in_cdata = _count_programmes(piece, in_cdata)
+                    programmes += found
+                    dst.write(piece)
+                    written += len(piece)
+                if not chunk:
+                    break
+    except (gzip.BadGzipFile, EOFError, OSError, zlib.error):
+        return None
+    if not written:
+        return None
+    return written, programmes
 
 
 # Common XMLTV timezone abbreviations mapped to their UTC offset in minutes.
@@ -308,6 +452,8 @@ class EPGIngestManager:
         password = resolve_account_password(account)
         client = make_provider_client(account, password, XtreamClient)
         insert_stmt = _program_insert_stmt()
+        # The guide is staged on disk here rather than held in memory.
+        work_dir = tempfile.mkdtemp(prefix="mustarrd-xmltv-")
         try:
             channels = await client.get_live_streams()
             catchup_channels = [
@@ -341,19 +487,11 @@ class EPGIngestManager:
 
             channel_maps = self._build_channel_maps(catchup_channels)
 
-            raw_xmltv = await client.get_xmltv()
-            # Decompressing a large guide (tens of MB of gzip) is CPU-bound;
-            # run it off the event loop so downloads and WebSockets keep moving.
-            xmltv_bytes = (
-                await asyncio.to_thread(self._maybe_decompress, raw_xmltv)
-                if raw_xmltv else b""
-            )
-            _xmltv_no_cdata = re.sub(rb"<!\[CDATA\[.*?\]\]>", b"", xmltv_bytes, flags=re.DOTALL) if xmltv_bytes else b""
-            total_programs = _xmltv_no_cdata.count(b"<programme")
+            xmltv_bytes, xmltv_size, total_programs = await self._fetch_xmltv(client, work_dir)
             self._status["total_programs"] = total_programs if total_programs > 0 else None
             if xmltv_bytes:
                 await self._log(
-                    f"XMLTV downloaded ({len(xmltv_bytes):,} bytes, {total_programs:,} programme tags).",
+                    f"XMLTV downloaded ({xmltv_size:,} bytes, {total_programs:,} programme tags).",
                     account=account
                 )
             else:
@@ -538,6 +676,7 @@ class EPGIngestManager:
 
         finally:
             await client.close()
+            shutil.rmtree(work_dir, ignore_errors=True)
 
         epg_service.clear_cache()
         self._status.update({
@@ -662,7 +801,45 @@ class EPGIngestManager:
             return [str(v) for v in value]
         return [str(value)]
 
-    def _scan_channel_map(self, xmltv_bytes: bytes, channel_maps: dict) -> tuple[Dict[str, list], bool]:
+    async def _fetch_xmltv(self, client, work_dir: str) -> tuple[Optional[XMLTVSource], int, int]:
+        """Fetch the guide and stage it as a sanitised file in work_dir.
+
+        A client that can stream the guide to disk (``download_xmltv``) never
+        has the whole document in memory. Anything else hands back bytes,
+        which are decompressed off the event loop as before and then written
+        out, so every guide goes through the same streaming preparation.
+
+        Returns:
+            (source, size in bytes, programme tags), with source None when the
+            provider returned nothing usable.
+        """
+        raw_path = os.path.join(work_dir, "raw")
+        out_path = os.path.join(work_dir, "guide.xml")
+        # Looked up on the class: a mock client answers every attribute.
+        if callable(getattr(type(client), "download_xmltv", None)):
+            await client.download_xmltv(raw_path)
+        else:
+            raw_xmltv = await client.get_xmltv()
+            # Decompressing a large guide (tens of MB of gzip) is CPU-bound;
+            # run it off the event loop so downloads and WebSockets keep moving.
+            data = await asyncio.to_thread(self._maybe_decompress, raw_xmltv) if raw_xmltv else b""
+            if not data:
+                return None, 0, 0
+            await asyncio.to_thread(_write_bytes, raw_path, data)
+            del data, raw_xmltv
+        if not os.path.exists(raw_path):
+            return None, 0, 0
+        prepared = await asyncio.to_thread(_prepare_xmltv_file, raw_path, out_path)
+        try:
+            os.remove(raw_path)
+        except OSError:
+            pass
+        if prepared is None:
+            return None, 0, 0
+        size, programmes = prepared
+        return out_path, size, programmes
+
+    def _scan_channel_map(self, xmltv_bytes: XMLTVSource, channel_maps: dict) -> tuple[Dict[str, list], bool]:
         """First pass over the XMLTV document.
 
         Builds the complete xmltv-id -> stream-ids mapping from <channel>
@@ -682,25 +859,25 @@ class EPGIngestManager:
         }
         parse_ok = True
         try:
-            sanitized = io.BytesIO(_sanitize_html_entities(xmltv_bytes))
-            for _, elem in ET.iterparse(sanitized, events=("end",)):
-                local_tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
-                if local_tag == "channel":
-                    xmltv_id = (elem.get("id") or "").lower() or None
-                    display_name = self._extract_text(elem, "display-name")
-                    if xmltv_id and xmltv_id not in xmltv_to_stream:
-                        if xmltv_id in stream_info:
-                            xmltv_to_stream[xmltv_id] = [xmltv_id]
-                        elif display_name:
-                            name_key = self._normalize_name(display_name)
-                            stream_id = stream_by_name.get(name_key)
-                            if stream_id:
-                                xmltv_to_stream[xmltv_id] = [stream_id]
-                # Only clear top-level elements: clearing every end event would
-                # wipe child text (e.g. <display-name>) before its parent
-                # <channel> element is processed.
-                if local_tag in ("channel", "programme"):
-                    elem.clear()
+            with _open_xmltv(xmltv_bytes) as sanitized:
+                for _, elem in ET.iterparse(sanitized, events=("end",)):
+                    local_tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+                    if local_tag == "channel":
+                        xmltv_id = (elem.get("id") or "").lower() or None
+                        display_name = self._extract_text(elem, "display-name")
+                        if xmltv_id and xmltv_id not in xmltv_to_stream:
+                            if xmltv_id in stream_info:
+                                xmltv_to_stream[xmltv_id] = [xmltv_id]
+                            elif display_name:
+                                name_key = self._normalize_name(display_name)
+                                stream_id = stream_by_name.get(name_key)
+                                if stream_id:
+                                    xmltv_to_stream[xmltv_id] = [stream_id]
+                    # Only clear top-level elements: clearing every end event would
+                    # wipe child text (e.g. <display-name>) before its parent
+                    # <channel> element is processed.
+                    if local_tag in ("channel", "programme"):
+                        elem.clear()
         except ET.ParseError as exc:
             parse_ok = False
             logger.warning(
@@ -711,7 +888,7 @@ class EPGIngestManager:
 
     def _iter_programs(
         self,
-        xmltv_bytes: bytes,
+        xmltv_bytes: XMLTVSource,
         channel_maps: dict,
         now_utc: datetime,
         xmltv_to_stream: Optional[Dict[str, list]] = None,
@@ -728,91 +905,90 @@ class EPGIngestManager:
                 for key, value in xmltv_to_stream.items()
             }
 
-        xmltv_bytes = _sanitize_html_entities(xmltv_bytes)
-
         try:
-            for _, elem in ET.iterparse(io.BytesIO(xmltv_bytes), events=("end",)):
-                local_tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
-                if local_tag == "channel":
-                    xmltv_id = (elem.get("id") or "").lower() or None
-                    display_name = self._extract_text(elem, "display-name")
-                    if xmltv_id and xmltv_id not in xmltv_to_stream:
-                        if xmltv_id in stream_info:
-                            xmltv_to_stream[xmltv_id] = [xmltv_id]
-                        elif display_name:
-                            name_key = self._normalize_name(display_name)
-                            stream_id = stream_by_name.get(name_key)
-                            if stream_id:
-                                xmltv_to_stream[xmltv_id] = [stream_id]
+            with _open_xmltv(xmltv_bytes) as stream:
+                for _, elem in ET.iterparse(stream, events=("end",)):
+                    local_tag = elem.tag.split("}")[-1] if "}" in elem.tag else elem.tag
+                    if local_tag == "channel":
+                        xmltv_id = (elem.get("id") or "").lower() or None
+                        display_name = self._extract_text(elem, "display-name")
+                        if xmltv_id and xmltv_id not in xmltv_to_stream:
+                            if xmltv_id in stream_info:
+                                xmltv_to_stream[xmltv_id] = [xmltv_id]
+                            elif display_name:
+                                name_key = self._normalize_name(display_name)
+                                stream_id = stream_by_name.get(name_key)
+                                if stream_id:
+                                    xmltv_to_stream[xmltv_id] = [stream_id]
+                        elem.clear()
+                        continue
+
+                    if local_tag != "programme":
+                        continue
+
+                    xmltv_id = (elem.get("channel") or "").lower() or None
+                    if not xmltv_id:
+                        elem.clear()
+                        continue
+
+                    stream_ids = [
+                        sid for sid in self._as_stream_ids(xmltv_to_stream.get(xmltv_id))
+                        if sid in stream_info
+                    ]
+                    if not stream_ids:
+                        elem.clear()
+                        continue
+
+                    start_raw = elem.get("start")
+                    stop_raw = elem.get("stop")
+                    start_dt = self._parse_xmltv_time(start_raw)
+                    end_dt = self._parse_xmltv_time(stop_raw)
+                    if not start_dt or not end_dt:
+                        elem.clear()
+                        continue
+
+                    start_utc = start_dt.astimezone(timezone.utc)
+                    end_utc = end_dt.astimezone(timezone.utc)
+
+                    duration_minutes = int((end_utc - start_utc).total_seconds() / 60)
+                    if duration_minutes <= 0:
+                        elem.clear()
+                        continue
+
+                    title = self._extract_text(elem, "title") or "Unknown"
+                    description = self._extract_text(elem, "desc")
+                    metadata_columns = GuideMetadata.from_xmltv_element(elem).to_columns()
+
+                    start_ts = int(start_utc.timestamp())
+                    stop_ts = int(end_utc.timestamp())
+
+                    for stream_id in stream_ids:
+                        info = stream_info[stream_id]
+                        archive_days = int(info.get("archive_days") or 0)
+                        if archive_days > 0:
+                            channel_cutoff = now_utc - timedelta(days=archive_days)
+                            if end_utc < channel_cutoff:
+                                continue
+
+                        yield {
+                            "channel_id": stream_id,
+                            "channel_name": info["name"],
+                            "xmltv_id": xmltv_id,
+                            "epg_id": f"{stream_id}:{start_ts}:{stop_ts}",
+                            "title": title,
+                            "description": description,
+                            **metadata_columns,
+                            "start_time": start_utc,
+                            "end_time": end_utc,
+                            "start_timestamp": start_ts,
+                            "stop_timestamp": stop_ts,
+                            "provider_start": start_raw,
+                            "provider_stop": stop_raw,
+                            "duration_minutes": duration_minutes,
+                            "has_archive": info["has_archive"],
+                        }
+
                     elem.clear()
-                    continue
-
-                if local_tag != "programme":
-                    continue
-
-                xmltv_id = (elem.get("channel") or "").lower() or None
-                if not xmltv_id:
-                    elem.clear()
-                    continue
-
-                stream_ids = [
-                    sid for sid in self._as_stream_ids(xmltv_to_stream.get(xmltv_id))
-                    if sid in stream_info
-                ]
-                if not stream_ids:
-                    elem.clear()
-                    continue
-
-                start_raw = elem.get("start")
-                stop_raw = elem.get("stop")
-                start_dt = self._parse_xmltv_time(start_raw)
-                end_dt = self._parse_xmltv_time(stop_raw)
-                if not start_dt or not end_dt:
-                    elem.clear()
-                    continue
-
-                start_utc = start_dt.astimezone(timezone.utc)
-                end_utc = end_dt.astimezone(timezone.utc)
-
-                duration_minutes = int((end_utc - start_utc).total_seconds() / 60)
-                if duration_minutes <= 0:
-                    elem.clear()
-                    continue
-
-                title = self._extract_text(elem, "title") or "Unknown"
-                description = self._extract_text(elem, "desc")
-                metadata_columns = GuideMetadata.from_xmltv_element(elem).to_columns()
-
-                start_ts = int(start_utc.timestamp())
-                stop_ts = int(end_utc.timestamp())
-
-                for stream_id in stream_ids:
-                    info = stream_info[stream_id]
-                    archive_days = int(info.get("archive_days") or 0)
-                    if archive_days > 0:
-                        channel_cutoff = now_utc - timedelta(days=archive_days)
-                        if end_utc < channel_cutoff:
-                            continue
-
-                    yield {
-                        "channel_id": stream_id,
-                        "channel_name": info["name"],
-                        "xmltv_id": xmltv_id,
-                        "epg_id": f"{stream_id}:{start_ts}:{stop_ts}",
-                        "title": title,
-                        "description": description,
-                        **metadata_columns,
-                        "start_time": start_utc,
-                        "end_time": end_utc,
-                        "start_timestamp": start_ts,
-                        "stop_timestamp": stop_ts,
-                        "provider_start": start_raw,
-                        "provider_stop": stop_raw,
-                        "duration_minutes": duration_minutes,
-                        "has_archive": info["has_archive"],
-                    }
-
-                elem.clear()
         except ET.ParseError as exc:
             logger.warning(
                 "XMLTV file was truncated or malformed; partial EPG data was imported. (%s)",

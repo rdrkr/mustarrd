@@ -47,7 +47,9 @@ PROVIDER_TYPE_M3U = "m3u"
 PROVIDER_TYPES = (PROVIDER_TYPE_XTREAM, PROVIDER_TYPE_M3U)
 
 PLAYLIST_TIMEOUT = aiohttp.ClientTimeout(total=60)
-XMLTV_TIMEOUT = aiohttp.ClientTimeout(total=300)
+# Seven-day guides are hundreds of megabytes; allow a slow line half an hour,
+# but give up on a connection that stops delivering for two minutes.
+XMLTV_TIMEOUT = aiohttp.ClientTimeout(total=1800, sock_read=120)
 
 # A parsed playlist is reused for this long. Every API call builds a fresh
 # client, and a large playlist is half a megabyte, so without this a single page
@@ -419,6 +421,26 @@ class M3UClient:
             if response.status != 200:
                 raise Exception(f"Failed to get XMLTV: HTTP {response.status}")
             return await response.read()
+
+    async def download_xmltv(self, path: str) -> None:
+        """Stream the XMLTV guide to a file, never holding it whole in memory.
+
+        Seven-day guides run past half a gigabyte uncompressed, which is more
+        than the whole process should hold at once. Writes nothing when there
+        is no guide URL, which the ingest treats as an empty guide.
+        """
+        url = self.epg_url
+        if not url:
+            url = (await self.load_playlist()).epg_url
+        if not url:
+            return
+        session = await self._get_session()
+        async with session.get(url, timeout=XMLTV_TIMEOUT) as response:
+            if response.status != 200:
+                raise Exception(f"Failed to get XMLTV: HTTP {response.status}")
+            with open(path, "wb") as f:
+                async for chunk in response.content.iter_chunked(1024 * 1024):
+                    f.write(chunk)
 
     async def get_vod_categories(self) -> list:
         return []
