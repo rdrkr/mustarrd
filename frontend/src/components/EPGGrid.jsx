@@ -4,6 +4,7 @@ import { IconClock, IconDownload, IconCalendar, IconPlayerPlay } from '@tabler/i
 import {
   getChannelDisplayTime,
   getGuideOffsetHours,
+  normalizeGuideClock,
   getNowUtc,
   getProgramInstant,
 } from '../utils/channelTime'
@@ -223,7 +224,7 @@ export default function EPGGrid({
 }) {
   const scrollAreaRef = useRef(null)
   const didAutoScrollRef = useRef(false)
-  const normalizedGuideOffsetHours = getGuideOffsetHours(guideOffsetHours)
+  const normalizedGuideOffsetHours = normalizeGuideClock(guideOffsetHours)
   const now = useMemo(() => getNowUtc(), [epgData, showFuture])
 
   // Programs that ended before this instant are outside the provider's

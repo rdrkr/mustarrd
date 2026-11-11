@@ -39,7 +39,7 @@ import duration from 'dayjs/plugin/duration'
 
 import { accountsApi, authApi, downloadsApi, schedulesApi, settingsApi } from '../api'
 import HistoryRow from '../components/HistoryRow'
-import { formatChannelDateTime, formatAirDateTime, getGuideOffsetHours, getChannelDisplayTime, getNowUtc } from '../utils/channelTime'
+import { formatChannelDateTime, formatAirDateTime, getAccountGuideClock, getGuideOffsetHours, getChannelDisplayTime, getNowUtc } from '../utils/channelTime'
 import classes from './Scheduled.module.css'
 
 dayjs.extend(duration)
@@ -457,7 +457,7 @@ export default function Scheduled() {
     ? historySchedules
     : historySchedules.filter((s) => s.status === historyFilter)
   const accountGuideOffsets = Object.fromEntries(
-    (accounts || []).map((account) => [Number(account.id), getGuideOffsetHours(account.guide_offset_hours)])
+    (accounts || []).map((account) => [Number(account.id), getAccountGuideClock(account)])
   )
 
   // Group upcoming recordings by air date (in each channel's display time),

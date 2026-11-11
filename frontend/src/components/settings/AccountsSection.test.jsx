@@ -169,6 +169,7 @@ describe('AccountsSection', () => {
       server_url: 'https://hls.example/pl/61/AbC/playlist.m3u8',
       epg_url: null,
       guide_offset_hours: 0,
+      guide_timezone: null,
     })
   })
 })

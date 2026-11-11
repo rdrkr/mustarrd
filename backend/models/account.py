@@ -28,6 +28,10 @@ class XtreamAccount(Base):
     active_connections: Mapped[int | None] = mapped_column(Integer, nullable=True)
     expiration_date: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     guide_offset_hours: Mapped[int] = mapped_column(Integer, default=0)
+    # IANA time zone the guide is shown in (e.g. "Europe/Rome"), following
+    # daylight saving. Display only: when unset, times show as UTC plus
+    # guide_offset_hours, which also keeps its provider-alignment role.
+    guide_timezone: Mapped[str | None] = mapped_column(String(64), nullable=True)
     catchup_resolution_mode: Mapped[str] = mapped_column(String(32), default="auto")
     catchup_fallback_offset_minutes: Mapped[int] = mapped_column(Integer, default=0)
     # How catchup URLs are shaped for this provider: the user's choice
@@ -59,6 +63,7 @@ class XtreamAccount(Base):
             "active_connections": self.active_connections,
             "expiration_date": self.expiration_date.isoformat() if self.expiration_date else None,
             "guide_offset_hours": int(self.guide_offset_hours or 0),
+            "guide_timezone": self.guide_timezone,
             "catchup_url_style": self.catchup_url_style or "auto",
             "catchup_url_style_resolved": self.catchup_url_style_resolved,
             "last_connection_ok": self.last_connection_ok,

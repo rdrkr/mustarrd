@@ -39,6 +39,7 @@ class DefaultAccountSettingsTests(unittest.IsolatedAsyncioTestCase):
                             password="",
                             is_active=True,
                             guide_offset_hours=4,
+                            guide_timezone="Europe/Rome",
                         )
                     ]
                 )
@@ -55,6 +56,7 @@ class DefaultAccountSettingsTests(unittest.IsolatedAsyncioTestCase):
                     "name": "Provider A",
                     "is_active": True,
                     "guide_offset_hours": 4,
+                    "guide_timezone": "Europe/Rome",
                 }
             ],
         )

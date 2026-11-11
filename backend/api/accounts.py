@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, field_validator, model_validator
@@ -54,6 +55,18 @@ def _validate_provider_type(value: str | None) -> str | None:
     return normalized
 
 
+def _validate_guide_timezone(value: str | None) -> str | None:
+    """Accept an IANA time zone name, or nothing; an empty string clears it."""
+    if value is None or not value.strip():
+        return None
+    name = value.strip()
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        raise ValueError(f"Unknown time zone: {name}")
+    return name
+
+
 class AccountCreate(BaseModel):
     name: str
     # The Xtream server URL, or for an M3U account the playlist URL.
@@ -65,10 +78,12 @@ class AccountCreate(BaseModel):
     # M3U only: an XMLTV URL overriding the playlist's own url-tvg.
     epg_url: str | None = None
     guide_offset_hours: int = 0
+    guide_timezone: str | None = None
     catchup_url_style: str = TIMESHIFT_STYLE_AUTO
 
     _check_style = field_validator("catchup_url_style")(_validate_catchup_url_style)
     _check_provider = field_validator("provider_type")(_validate_provider_type)
+    _check_timezone = field_validator("guide_timezone")(_validate_guide_timezone)
 
     @model_validator(mode="after")
     def _require_credentials(self):
@@ -89,10 +104,12 @@ class AccountUpdate(BaseModel):
     epg_url: str | None = None
     is_active: bool | None = None
     guide_offset_hours: int | None = None
+    guide_timezone: str | None = None
     catchup_url_style: str | None = None
 
     _check_style = field_validator("catchup_url_style")(_validate_catchup_url_style)
     _check_provider = field_validator("provider_type")(_validate_provider_type)
+    _check_timezone = field_validator("guide_timezone")(_validate_guide_timezone)
 
 
 @router.get("")
@@ -120,6 +137,7 @@ async def list_accounts_public(
             "name": acc.name,
             "is_active": acc.is_active,
             "guide_offset_hours": int(acc.guide_offset_hours or 0),
+            "guide_timezone": acc.guide_timezone,
         }
         for acc in accounts
     ]
@@ -172,6 +190,7 @@ async def create_account(
         active_connections=user_info.get("active_cons"),
         expiration_date=exp_date,
         guide_offset_hours=int(account.guide_offset_hours or 0),
+        guide_timezone=account.guide_timezone,
         catchup_url_style=account.catchup_url_style,
     )
 

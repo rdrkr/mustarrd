@@ -44,6 +44,7 @@ import {
   formatChannelDateTime,
   getChannelDisplayTime,
   getGuideOffsetHours,
+  getAccountGuideClock,
   getProgramInstant,
   getNowUtc,
 } from '../utils/channelTime'
@@ -351,7 +352,7 @@ export default function Browse() {
   })
   const selectedGuideOffsetHours = useMemo(() => {
     const account = accounts?.find((entry) => Number(entry.id) === Number(selectedAccountId))
-    return getGuideOffsetHours(account?.guide_offset_hours)
+    return getAccountGuideClock(account)
   }, [accounts, selectedAccountId])
   useEffect(() => {
     if (!accounts?.length) {

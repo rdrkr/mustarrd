@@ -20,6 +20,7 @@ import {
   addMinutesToChannelInput,
   channelDisplayToUnix,
   getGuideOffsetHours,
+  normalizeGuideClock,
   nowChannelInput,
 } from '../utils/channelTime'
 
@@ -86,7 +87,7 @@ export default function TimeSlotModal({
   archiveDays = null,
 }) {
   const queryClient = useQueryClient()
-  const normalizedGuideOffsetHours = getGuideOffsetHours(guideOffsetHours)
+  const normalizedGuideOffsetHours = normalizeGuideClock(guideOffsetHours)
   const [startValue, setStartValue] = useState('')
   const [endValue, setEndValue] = useState('')
   const [title, setTitle] = useState('')

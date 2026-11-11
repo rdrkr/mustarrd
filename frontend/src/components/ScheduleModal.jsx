@@ -26,7 +26,7 @@ import {
 } from '@tabler/icons-react'
 
 import { downloadsApi, schedulesApi, settingsApi } from '../api'
-import { formatChannelDateTime, getChannelDisplayTime, getGuideOffsetHours } from '../utils/channelTime'
+import { formatChannelDateTime, getChannelDisplayTime, getGuideOffsetHours, normalizeGuideClock } from '../utils/channelTime'
 
 const typeIcons = {
   tv_show: IconVideo,
@@ -54,7 +54,7 @@ export default function ScheduleModal({ opened, onClose, program, channel, accou
   const [offsetsDirty, setOffsetsDirty] = useState(false)
   const { colorScheme } = useMantineColorScheme()
   const theme = useMantineTheme()
-  const normalizedGuideOffsetHours = getGuideOffsetHours(guideOffsetHours)
+  const normalizedGuideOffsetHours = normalizeGuideClock(guideOffsetHours)
 
   const accordionStyles = {
     item: {

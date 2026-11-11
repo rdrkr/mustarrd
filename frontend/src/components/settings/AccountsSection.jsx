@@ -51,8 +51,18 @@ function timeAgo(dateStr) {
 }
 
 function getGuideOffsetLabel(account) {
+  if (account?.guide_timezone) return `Guide time zone: ${account.guide_timezone}`
   const offset = Number(account?.guide_offset_hours || 0)
   return offset ? `Guide offset: ${offset >= 0 ? '+' : ''}${offset}h` : 'Guide offset: 0h'
+}
+
+/** Every IANA time zone the browser knows, for the guide time zone picker. */
+function timeZoneOptions() {
+  try {
+    return Intl.supportedValuesOf('timeZone')
+  } catch {
+    return ['UTC', 'Europe/Rome', 'Asia/Jerusalem', 'Europe/London', 'America/New_York']
+  }
 }
 
 function getCatchupLabel(account) {
@@ -108,6 +118,7 @@ function AccountForm({ account, onSubmit, onCancel, isLoading }) {
     password: account?.password || '',
     epg_url: account?.epg_url || '',
     guide_offset_hours: account?.guide_offset_hours || 0,
+    guide_timezone: account?.guide_timezone || '',
     catchup_url_style: account?.catchup_url_style || 'auto',
   })
   const isM3U = formData.provider_type === 'm3u'
@@ -115,6 +126,7 @@ function AccountForm({ account, onSubmit, onCancel, isLoading }) {
   const handleSubmit = (e) => {
     e.preventDefault()
     const payload = { ...formData }
+    payload.guide_timezone = payload.guide_timezone || null
     if (isM3U) {
       // A playlist carries its own authorisation and its own catchup form.
       delete payload.username
@@ -192,6 +204,16 @@ function AccountForm({ account, onSubmit, onCancel, isLoading }) {
             />
           </>
         )}
+        <Select
+          label="Guide time zone"
+          description="Show this account's guide times on this clock, following daylight saving. Leave empty to show UTC plus the offset below."
+          placeholder="UTC + offset"
+          data={timeZoneOptions()}
+          searchable
+          clearable
+          value={formData.guide_timezone || null}
+          onChange={(value) => setFormData({ ...formData, guide_timezone: value || '' })}
+        />
         <NumberInput
           label="Guide Alignment Offset (hours)"
           description="Shifts the displayed guide times for this account only. Downloads and schedules still target the same underlying program record."
@@ -306,7 +328,7 @@ function AccountCard({ account, isDefault, onSetDefault, onEdit, onDelete, onTes
             {catchupStyleLabel(account)}
           </Badge>
         )}
-        {Number(account?.guide_offset_hours || 0) !== 0 && (
+        {(account?.guide_timezone || Number(account?.guide_offset_hours || 0) !== 0) && (
           <Badge variant="light" size="sm" color="grape">
             {getGuideOffsetLabel(account)}
           </Badge>

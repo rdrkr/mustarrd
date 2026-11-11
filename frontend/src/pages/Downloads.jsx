@@ -39,7 +39,7 @@ import duration from 'dayjs/plugin/duration'
 
 import { accountsApi, authApi, downloadsApi, createDownloadWebSocket } from '../api'
 import HistoryRow from '../components/HistoryRow'
-import { formatChannelDateTime, formatAirDateTime, getGuideOffsetHours } from '../utils/channelTime'
+import { formatChannelDateTime, formatAirDateTime, getGuideOffsetHours, getAccountGuideClock } from '../utils/channelTime'
 import {
   PLAYABLE_DOWNLOAD_STATUSES,
   RETRYABLE_DOWNLOAD_STATUSES,
@@ -460,7 +460,7 @@ export default function Downloads() {
     ? historyDownloads
     : historyDownloads.filter((d) => d.status === historyFilter)
   const accountGuideOffsets = Object.fromEntries(
-    (accounts || []).map((account) => [Number(account.id), getGuideOffsetHours(account.guide_offset_hours)])
+    (accounts || []).map((account) => [Number(account.id), getAccountGuideClock(account)])
   )
 
   const renderHistoryActions = (download) => {
