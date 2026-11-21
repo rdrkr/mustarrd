@@ -26,6 +26,24 @@ from api.accounts import delete_account
 from models import AppSettings, EPGProgram, XtreamAccount
 
 
+# These tests script the exact queries a delete makes. Recording rules are
+# cleaned up on the same path and have their own tests
+# (tests/test_recording_rules.py), so that step is stubbed out here.
+from services.recording_rule_service import recording_rule_service as _recording_rule_service
+
+_rules_cleanup_stub = patch.object(
+    _recording_rule_service, "delete_rules", AsyncMock(return_value=0)
+)
+
+
+def setUpModule():
+    _rules_cleanup_stub.start()
+
+
+def tearDownModule():
+    _rules_cleanup_stub.stop()
+
+
 def _scalar_one(value):
     class R:
         def scalar_one_or_none(self):
@@ -78,9 +96,10 @@ class DeleteAccountEPGCleanupTests(unittest.IsolatedAsyncioTestCase):
         account = _make_account()
         session, result = await self._run_delete(account)
         self.assertEqual(result, {"status": "deleted"})
-        # Fifth execute call must target epg_programs table.
+        # Fifth execute call must target epg_programs table. Calls after the
+        # commit (best-effort notification cleanup, #430) are not counted.
         calls = session.execute.await_args_list
-        self.assertEqual(len(calls), 5)
+        self.assertGreaterEqual(len(calls), 5)
         epg_stmt = calls[4].args[0]
         self.assertEqual(str(epg_stmt.table), str(EPGProgram.__table__))
 

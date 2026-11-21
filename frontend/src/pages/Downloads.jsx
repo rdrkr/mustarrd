@@ -33,6 +33,7 @@ import {
   IconChevronUp,
   IconDatabase,
   IconAlertTriangle,
+  IconPhoto,
 } from '@tabler/icons-react'
 import dayjs from 'dayjs'
 import duration from 'dayjs/plugin/duration'
@@ -41,7 +42,7 @@ import { accountsApi, authApi, downloadsApi, createDownloadWebSocket } from '../
 import HistoryRow from '../components/HistoryRow'
 import { formatChannelDateTime, formatAirDateTime, getGuideOffsetHours, getAccountGuideClock } from '../utils/channelTime'
 import {
-  PLAYABLE_DOWNLOAD_STATUSES,
+  isPlayableDownload,
   RETRYABLE_DOWNLOAD_STATUSES,
   TERMINAL_DOWNLOAD_STATUSES,
 } from '../constants/downloadStatus'
@@ -90,14 +91,70 @@ function getFileName(filePath) {
   return parts[parts.length - 1] || 'file'
 }
 
-// "54 min of 60 min" for an interrupted recording, so the user can see how
-// much of the program was actually captured. Null when we have no probed
-// duration to compare against.
-function formatRecordedVsExpected(download) {
-  const recorded = download?.recorded_duration_seconds
-  const expected = download?.duration_minutes
-  if (!recorded || recorded <= 0 || !expected || expected <= 0) return null
-  return `${Math.round(recorded / 60)} min of ${expected} min`
+function formatMediaDuration(seconds) {
+  const total = Math.round(seconds)
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const remainder = total % 60
+  const parts = []
+  if (hours) parts.push(`${hours}h`)
+  if (minutes) parts.push(`${minutes}m`)
+  if (remainder || parts.length === 0) parts.push(`${remainder}s`)
+  return parts.join(' ')
+}
+
+// What the optional end-trim step did to a long recording, or null when it
+// has nothing to say. Most people never turn that option on, and a recording
+// it never touched (or one from before it existed) gets no trim note at all.
+function bufferTrimOutcome(download) {
+  const outcomes = {
+    trimmed: 'Successfully trimmed to expected length',
+    failed: 'Not trimmed — trim failed',
+    already_matched: 'Already at expected length (no trim needed)',
+  }
+  if (download.buffer_trim_status === 'in_progress') {
+    return download.status === 'processing' ? 'Trimming in progress' : 'Trim outcome not confirmed'
+  }
+  return outcomes[download.buffer_trim_status] || null
+}
+
+function renderDurationAnalysis(download) {
+  const status = download.duration_analysis_status
+  if (download.is_vod || !status) return null
+
+  const labels = {
+    matched: 'Matches expected length',
+    short: 'Shorter than expected',
+    long: 'Longer than expected',
+  }
+  const raw = download.raw_duration_seconds
+  const expected = download.expected_duration_seconds
+  const hasComparison = labels[status] &&
+    Number.isFinite(raw) && raw > 0 &&
+    Number.isFinite(expected) && expected > 0
+
+  // The final recorded_duration_seconds may already have had commercials
+  // removed. Only the persisted raw analysis can describe what was downloaded.
+  return (
+    <div style={{ whiteSpace: 'normal', marginTop: 4 }}>
+      {hasComparison ? (
+        <>
+          <div>Downloaded before processing: {formatMediaDuration(raw)} · {labels[status]}</div>
+          <div>
+            Expected: {formatMediaDuration(expected)} (including padding)
+            {status === 'long' && bufferTrimOutcome(download) && ` · ${bufferTrimOutcome(download)}`}
+          </div>
+        </>
+      ) : (
+        <>
+          <div>
+            {status === 'unreliable' ? 'Download length could not be verified' : 'Download length unavailable'}
+          </div>
+          {download.duration_analysis_reason && <div>{download.duration_analysis_reason}</div>}
+        </>
+      )}
+    </div>
+  )
 }
 
 // An interrupted recording carries two independent messages: why the capture
@@ -106,7 +163,9 @@ function formatRecordedVsExpected(download) {
 function renderRowMessages(download) {
   const messages = [download.interruption_reason, download.error_message].filter(Boolean)
   if (messages.length === 0) return null
-  return messages.map((msg, i) => <div key={i}>{renderErrorMessage(msg)}</div>)
+  return messages.map((msg, i) => (
+    <div key={i} style={{ whiteSpace: 'normal', overflowWrap: 'anywhere' }}>{renderErrorMessage(msg)}</div>
+  ))
 }
 
 function getStatusBadge(status) {
@@ -375,6 +434,33 @@ export default function Downloads() {
     },
   })
 
+  const refreshPosterMutation = useMutation({
+    mutationFn: (download) => downloadsApi.refreshPoster(download.id),
+    onSuccess: (data) => {
+      queryClient.invalidateQueries({ queryKey: ['downloads'] })
+      notifications.show(
+        data?.found
+          ? {
+              title: 'Artwork Updated',
+              message: 'The poster for this recording was looked up again',
+              color: 'green',
+            }
+          : {
+              title: 'No Artwork Found',
+              message: 'No poster could be found for this recording',
+              color: 'yellow',
+            }
+      )
+    },
+    onError: (error) => {
+      notifications.show({
+        title: 'Error',
+        message: error.message,
+        color: 'red',
+      })
+    },
+  })
+
   const deleteMutation = useMutation({
     mutationFn: (download) => downloadsApi.cancel(download.id),
     onSuccess: () => {
@@ -459,6 +545,9 @@ export default function Downloads() {
   const filteredHistoryDownloads = historyFilter === 'all'
     ? historyDownloads
     : historyDownloads.filter((d) => d.status === historyFilter)
+  // Only give rows a poster slot when some recording has one, so a History
+  // with no artwork at all looks exactly as it did before.
+  const anyHistoryPosters = filteredHistoryDownloads.some((d) => d.poster)
   const accountGuideOffsets = Object.fromEntries(
     (accounts || []).map((account) => [Number(account.id), getAccountGuideClock(account)])
   )
@@ -471,7 +560,7 @@ export default function Downloads() {
 
     return (
       <>
-        {PLAYABLE_DOWNLOAD_STATUSES.includes(download.status) && (
+        {isPlayableDownload(download) && (
           isDesktop ? (
             <>
               <ActionIcon
@@ -525,6 +614,24 @@ export default function Downloads() {
               </ActionIcon>
             </>
           )
+        )}
+        {isPlayableDownload(download) && !download.is_vod && (
+          <ActionIcon
+            variant="subtle"
+            color="gray"
+            size={30}
+            radius={7}
+            visibleFrom="sm"
+            aria-label="Refresh artwork"
+            title="Refresh artwork"
+            loading={
+              refreshPosterMutation.isPending &&
+              refreshPosterMutation.variables?.id === download.id
+            }
+            onClick={() => refreshPosterMutation.mutate(download)}
+          >
+            <IconPhoto size={15} />
+          </ActionIcon>
         )}
         {canRetry && (
           <ActionIcon
@@ -686,25 +793,34 @@ export default function Downloads() {
                     const aired = formatAirDateTime(download, 'start', guideOffset)
                     const subtitleParts = [download.channel_name, aired]
                     if (
-                      PLAYABLE_DOWNLOAD_STATUSES.includes(download.status) &&
+                      isPlayableDownload(download) &&
                       download.output_path
                     ) {
                       subtitleParts.push(getFileName(download.output_path))
                     }
                     if (download.status === 'interrupted') {
-                      const captured = formatRecordedVsExpected(download)
-                      subtitleParts.unshift(
-                        captured ? `Interrupted - ${captured}` : 'Interrupted'
-                      )
+                      subtitleParts.unshift('Interrupted')
+                      const recorded = download.recorded_duration_seconds
+                      if (!download.duration_analysis_status && Number.isFinite(recorded) && recorded > 0) {
+                        subtitleParts.push(`Final file: ${formatMediaDuration(recorded)}`)
+                      }
                     }
                     return (
                       <HistoryRow
                         key={download.id}
                         status={download.status}
                         title={download.program_title}
-                        subtitle={subtitleParts.filter(Boolean).join(' · ')}
+                        subtitle={
+                          <>
+                            <div style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                              {subtitleParts.filter(Boolean).join(' · ')}
+                            </div>
+                            {renderDurationAnalysis(download)}
+                          </>
+                        }
+                        poster={anyHistoryPosters ? download.poster || null : undefined}
                         error={renderRowMessages(download)}
-                        size={PLAYABLE_DOWNLOAD_STATUSES.includes(download.status) && download.file_size > 0 ? formatBytes(download.file_size) : null}
+                        size={isPlayableDownload(download) && download.file_size > 0 ? formatBytes(download.file_size) : null}
                         actions={renderHistoryActions(download)}
                       />
                     )

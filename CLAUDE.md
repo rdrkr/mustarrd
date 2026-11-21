@@ -58,7 +58,7 @@ Disk-space preflight (`services/disk_space.py`) blocks downloads when space is l
 - `server_log_bridge` — streams server logs to the frontend Logs page
 
 ### API Routers (`backend/api/`)
-`auth`, `accounts`, `channels`, `downloads`, `schedules`, `vod`, `settings`, `epg`, `logs`, `onboarding`, `admin_users` (download-only user management), `admin_plex` (Plex server linking).
+`auth`, `accounts`, `channels`, `downloads`, `schedules`, `recording_rules` (recurring rules that create schedules; evaluated in `services/recording_rule_service.py` on save and after each EPG refresh), `vod`, `settings`, `epg`, `logs`, `onboarding`, `admin_users` (download-only user management), `admin_plex` (Plex server linking).
 
 ### Database & Migrations
 SQLite via async SQLAlchemy. Schema is created and migrated on every startup in `backend/database.py` using lightweight `ALTER TABLE` checks — no migration framework. `app_settings` table holds global config (padding defaults, transcode flags, etc.). Account/Plex secrets are encrypted at rest with AES-GCM (`services/credential_crypto.py`).
@@ -79,6 +79,7 @@ All settings use the `CATCHUP_` env prefix (see `backend/config.py`). A `.env` f
 - `CATCHUP_DATABASE_URL` — defaults to SQLite in `/app/config/` (Docker) or `data/` (local); `CATCHUP_DATA_ROOT` moves the local data dir
 - `CATCHUP_DEFAULT_DOWNLOAD_FOLDER` / `CATCHUP_DEFAULT_COMPLETED_FOLDER`
 - `CATCHUP_MAX_CONCURRENT_DOWNLOADS` (default: 2)
+- `CATCHUP_PROVIDER_USER_AGENT` — the User-Agent sent on every request to an IPTV provider (default: a VLC string; see `services/provider_http.py`). New provider request sites must pass `headers=provider_request_headers()`
 - `CATCHUP_FFMPEG_PATH`, `CATCHUP_COMSKIP_PATH` — override auto-detected tool paths (read in `post_processor.py`, not `config.py`)
 - `CATCHUP_SESSION_SECRET`, `CATCHUP_CORS_ORIGINS`, `CATCHUP_DEBUG`
 - `CATCHUP_DESKTOP_MODE=1` — desktop packaging mode (`desktop_server.py`, binds 127.0.0.1, downloads to `~/Downloads`)

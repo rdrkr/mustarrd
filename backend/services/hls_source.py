@@ -30,6 +30,8 @@ from urllib.parse import urljoin, urlsplit
 
 import aiohttp
 
+from services.provider_http import provider_request_headers
+
 SEGMENT_RETRIES = 3
 SEGMENT_RETRY_DELAY = 2.0
 DEFAULT_STALL_SECONDS = 90.0
@@ -184,7 +186,9 @@ async def iter_hls(
         HLSStatusError: The playlist was refused, or a segment kept failing.
     """
     own_session = http is None
-    session = http or aiohttp.ClientSession(timeout=FETCH_TIMEOUT)
+    session = http or aiohttp.ClientSession(
+        timeout=FETCH_TIMEOUT, headers=provider_request_headers()
+    )
     progress = progress if progress is not None else HLSProgress()
     try:
         media_url, playlist = await _load_media_playlist(session, url)

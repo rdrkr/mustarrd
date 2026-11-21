@@ -50,6 +50,8 @@ const baseSettings = {
   min_free_space_gb: 25,
   default_pre_padding_minutes: 1,
   default_post_padding_minutes: 2,
+  scheduled_download_delay_minutes: 5,
+  download_retry_window_seconds: 30,
   transcode_enabled: true,
   remux_only: true,
   transcode_format: 'mkv',
@@ -123,6 +125,46 @@ beforeEach(() => {
 })
 
 describe('Settings page', () => {
+  it.each([false, true])('changes short-file classification without changing the master retry switch (%s)', async (failedEnabled) => {
+    settingsApi.get.mockResolvedValue({ ...baseSettings, auto_retry_failed_downloads: failedEnabled })
+    renderSettings()
+    const toggle = await screen.findByRole('switch', { name: 'Mark short downloads as failed' })
+    expect(toggle).not.toBeChecked()
+    expect(screen.getByText('Download recovery')).toBeInTheDocument()
+    expect(screen.getByText(/If Auto-retry failed downloads is also on, a short recording is downloaded again/)).toBeInTheDocument()
+    fireEvent.click(toggle)
+    fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+    await waitFor(() => expect(settingsApi.update).toHaveBeenCalled())
+    expect(settingsApi.update.mock.calls[0][0]).toEqual({ mark_short_downloads_failed: true })
+  })
+
+  it('keeps the short-attempt explanation in parentheses in the setting description', async () => {
+    await renderSettings()
+    expect(await screen.findByText('Mark catchup recordings that are more than five seconds shorter than the requested length, including padding, as Failed. If Auto-retry failed downloads is also on, a short recording is downloaded again, up to three times. (The attempts wait unprocessed until retrying ends. Then the longest one is processed and kept, and the others are removed.)')).toBeInTheDocument()
+    expect(screen.queryByText('The attempts wait unprocessed until retrying ends. Then the longest one is processed and kept, and the others are removed.', { exact: true })).not.toBeInTheDocument()
+  })
+
+  it('can disable the saved short-file classification setting without changing other preferences', async () => {
+    settingsApi.get.mockResolvedValue({ ...baseSettings, mark_short_downloads_failed: true, auto_retry_failed_downloads: true })
+    renderSettings()
+    const toggle = await screen.findByRole('switch', { name: 'Mark short downloads as failed' })
+    expect(toggle).toBeChecked()
+    fireEvent.click(toggle)
+    fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+    await waitFor(() => expect(settingsApi.update).toHaveBeenCalled())
+    expect(settingsApi.update.mock.calls[0][0]).toEqual({ mark_short_downloads_failed: false })
+  })
+
+  it('finds download recovery through settings search', async () => {
+    renderSettings()
+    await screen.findByText('Connections')
+    fireEvent.click(screen.getByText('Post-Processing'))
+    fireEvent.change(screen.getByLabelText('Search settings'), { target: { value: 'recovery' } })
+    fireEvent.click(await screen.findByRole('button', { name: /Mark short downloads as failed/ }))
+    expect(await screen.findByText('Download recovery')).toBeInTheDocument()
+    expect(screen.getByRole('switch', { name: 'Mark short downloads as failed' })).not.toBeChecked()
+  })
+
   it('renders the grouped rail with renamed sections and lands on Recording', async () => {
     renderSettings()
 
@@ -196,6 +238,42 @@ describe('Settings page', () => {
     await waitFor(() => {
       expect(screen.queryByRole('button', { name: 'Save Changes' })).not.toBeInTheDocument()
     })
+  })
+
+  it('shows and saves the scheduled download delay', async () => {
+    renderSettings()
+    await screen.findByText('Wait after recording')
+
+    fireEvent.click(screen.getByRole('button', { name: 'Increase Scheduled download delay' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+
+    await waitFor(() => {
+      expect(settingsApi.update).toHaveBeenCalled()
+    })
+    expect(settingsApi.update.mock.calls[0][0]).toEqual({ scheduled_download_delay_minutes: 6 })
+  })
+
+  it('shows the retry window at its default and saves a longer one', async () => {
+    renderSettings()
+    const input = await screen.findByRole('textbox', { name: 'Keep retrying for' })
+    expect(input.value).toBe('30 seconds (default)')
+
+    fireEvent.click(input)
+    fireEvent.click(await screen.findByRole('option', { name: '10 minutes' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+
+    await waitFor(() => {
+      expect(settingsApi.update).toHaveBeenCalled()
+    })
+    expect(settingsApi.update.mock.calls[0][0]).toEqual({ download_retry_window_seconds: 600 })
+  })
+
+  it('shows a retry window saved outside the app instead of a blank box', async () => {
+    settingsApi.get.mockResolvedValue({ ...baseSettings, download_retry_window_seconds: 45 })
+    renderSettings()
+
+    const input = await screen.findByRole('textbox', { name: 'Keep retrying for' })
+    expect(input.value).toBe('45 seconds')
   })
 
   it('discards edits from the save bar', async () => {
@@ -340,6 +418,85 @@ describe('Settings page', () => {
       expect(settingsApi.update).toHaveBeenCalled()
     })
     expect(settingsApi.update.mock.calls[0][0]).toEqual({ write_nfo_files: false })
+  })
+
+  it('turns the update check off and saves only that field', async () => {
+    settingsApi.get.mockResolvedValue({
+      ...baseSettings,
+      update_check_enabled: true,
+      build_sha: '0123456789abcdef0123456789abcdef01234567',
+    })
+    renderSettings()
+    await screen.findByText('Connections')
+
+    fireEvent.click(screen.getByText('Updates'))
+
+    const toggle = await screen.findByRole('switch', { name: 'Check for updates' })
+    expect(toggle).toBeChecked()
+    expect(screen.getByText('0123456')).toBeInTheDocument()
+
+    fireEvent.click(toggle)
+    fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+
+    await waitFor(() => {
+      expect(settingsApi.update).toHaveBeenCalled()
+    })
+    expect(settingsApi.update.mock.calls[0][0]).toEqual({ update_check_enabled: false })
+  })
+
+  it('says when this build has no commit to check against', async () => {
+    renderSettings()
+    await screen.findByText('Connections')
+
+    fireEvent.click(screen.getByText('Updates'))
+
+    expect(await screen.findByRole('switch', { name: 'Check for updates' })).toBeChecked()
+    expect(screen.getByText('Local build')).toBeInTheDocument()
+  })
+
+  it('enables buffer trimming independently while keeping the original .ts format', async () => {
+    settingsApi.get.mockResolvedValue({ ...baseSettings, transcode_enabled: false })
+    renderSettings()
+    await screen.findByText('Connections')
+    fireEvent.click(screen.getByText('Post-Processing'))
+
+    const toggle = await screen.findByRole('switch', { name: 'Trim extra time from the end' })
+    expect(screen.getByText(/applies to every catchup recording on every account/)).toBeInTheDocument()
+    expect(toggle).not.toBeChecked()
+    expect(screen.getByRole('radio', { name: 'Keep .ts' })).toBeChecked()
+    expect(screen.getByText(/assumes the extra is at the end/)).toBeInTheDocument()
+    fireEvent.click(toggle)
+    expect(screen.getByRole('radio', { name: 'Keep .ts' })).toBeChecked()
+    expect(screen.getByRole('radio', { name: 'Off' })).toBeChecked()
+    fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+
+    await waitFor(() => expect(settingsApi.update).toHaveBeenCalled())
+    expect(settingsApi.update.mock.calls[0][0]).toEqual({ trim_dispatcharr_buffer: true })
+    const description = screen.getByText(/applies to every catchup recording on every account/)
+    expect(description).not.toHaveTextContent('Off by default.')
+  })
+
+  it('finds buffer trimming in search and can turn the saved option off', async () => {
+    settingsApi.get.mockResolvedValue({ ...baseSettings, trim_dispatcharr_buffer: true })
+    renderSettings()
+    await screen.findByText('Connections')
+    fireEvent.change(screen.getByLabelText('Search settings'), { target: { value: 'Dispatcharr' } })
+    fireEvent.click(await screen.findByText('Trim extra time from the end'))
+    const toggle = await screen.findByRole('switch', { name: 'Trim extra time from the end' })
+    expect(toggle).toBeChecked()
+    fireEvent.click(toggle)
+    fireEvent.click(screen.getByRole('button', { name: 'Save Changes' }))
+    await waitFor(() => expect(settingsApi.update).toHaveBeenCalled())
+    expect(settingsApi.update.mock.calls[0][0]).toEqual({ trim_dispatcharr_buffer: false })
+  })
+
+  it('warns that trimming needs FFmpeg even with Keep .ts', async () => {
+    settingsApi.get.mockResolvedValue({ ...baseSettings, transcode_enabled: false, trim_dispatcharr_buffer: true })
+    settingsApi.getTools.mockResolvedValue({ ffmpeg: { available: false }, comskip: { available: false } })
+    renderSettings()
+    await screen.findByText('Connections')
+    fireEvent.click(screen.getByText('Post-Processing'))
+    expect(await screen.findByText(/Buffer trimming also requires FFmpeg/)).toBeInTheDocument()
   })
 
   it('maps the two-step format picker onto the transcode fields', async () => {

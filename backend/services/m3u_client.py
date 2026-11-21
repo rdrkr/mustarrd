@@ -42,6 +42,8 @@ from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 import aiohttp
 
+from services.provider_http import provider_request_headers
+
 PROVIDER_TYPE_XTREAM = "xtream"
 PROVIDER_TYPE_M3U = "m3u"
 PROVIDER_TYPES = (PROVIDER_TYPE_XTREAM, PROVIDER_TYPE_M3U)
@@ -295,7 +297,9 @@ class M3UClient:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(timeout=PLAYLIST_TIMEOUT)
+            self._session = aiohttp.ClientSession(
+                timeout=PLAYLIST_TIMEOUT, headers=provider_request_headers()
+            )
         return self._session
 
     async def close(self):

@@ -11,6 +11,7 @@ from database import get_session
 from models import ScheduledRecording, ScheduledStatus, XtreamAccount, Download
 from services.download_manager import download_manager
 from services.file_namer import file_namer
+from schedule_timing import get_scheduled_download_delay_minutes
 
 
 router = APIRouter()
@@ -140,6 +141,7 @@ async def list_schedules(
         query = query.where(ScheduledRecording.requested_by_user_id == auth.user_id)
     result = await session.execute(query)
     schedules = result.scalars().all()
+    download_delay_minutes = await get_scheduled_download_delay_minutes(session)
 
     download_ids = [s.download_id for s in schedules if s.download_id]
     downloads = {}
@@ -152,12 +154,14 @@ async def list_schedules(
     response = []
     for schedule in schedules:
         download = downloads.get(schedule.download_id)
-        data = schedule.to_dict()
+        data = schedule.to_dict(download_delay_minutes)
         if download:
             data["status"] = _map_download_status(download.status)
             data["download_status"] = download.status
             data["download_progress"] = download.progress
             data["download_output_path"] = download.output_path
+            data["download_short_file_failed"] = bool(download.short_file_failed)
+            data["download_retry_finalized"] = bool(download.retry_finalized)
             data["download_error_message"] = download.error_message
         response.append(data)
 
@@ -168,11 +172,20 @@ async def _create_schedule_record(
     data: ScheduleCreate,
     auth: AuthContext,
     session: AsyncSession,
+    *,
+    recording_rule_id: int | None = None,
+    rule_airing_key: str | None = None,
+    allow_ended: bool = False,
 ) -> ScheduledRecording:
     """Validate and persist a new schedule (shared by create and import).
 
     Raises HTTPException: 404 unknown account, 400 invalid/already-ended
     program, 409 duplicate of an active schedule.
+
+    *allow_ended*: permit a programme whose broadcast has already finished.
+    Recurring rules use this so a rule created mid-broadcast (or shortly
+    after) still captures that airing from the catchup archive. The catchup
+    window itself is enforced later by the scheduled dispatcher.
     """
     result = await session.execute(
         select(XtreamAccount).where(XtreamAccount.id == data.account_id)
@@ -192,7 +205,7 @@ async def _create_schedule_record(
         raise HTTPException(status_code=400, detail="Invalid program payload")
 
     now_utc = datetime.now(timezone.utc)
-    if stop_ts <= int(now_utc.timestamp()):
+    if stop_ts <= int(now_utc.timestamp()) and not allow_ended:
         raise HTTPException(status_code=400, detail="Program already ended; download instead")
 
     epg_id = data.program.get("epg_id")
@@ -263,6 +276,8 @@ async def _create_schedule_record(
         status=ScheduledStatus.SCHEDULED.value,
         requested_by_user_id=auth.user_id,
         request_source=auth.provider or "admin_local",
+        recording_rule_id=recording_rule_id,
+        rule_airing_key=rule_airing_key,
     )
 
     session.add(schedule)
@@ -279,7 +294,8 @@ async def create_schedule(
     session: AsyncSession = Depends(get_session)
 ):
     schedule = await _create_schedule_record(data, auth, session)
-    return schedule.to_dict()
+    download_delay_minutes = await get_scheduled_download_delay_minutes(session)
+    return schedule.to_dict(download_delay_minutes)
 
 
 @router.get("/export")

@@ -34,6 +34,7 @@ from services.hls_streamer import (
 from services.account_credentials import resolve_account_password_with_migration
 from services.logo_cache import logo_cache
 from services.preview_budget import PREVIEW_MAX_CONCURRENT, preview_budget
+from services.provider_http import provider_request_headers
 from services.xtream_client import XtreamClient, resolve_timeshift_style
 from services.provider_client import make_provider_client
 from services.hls_source import HLSStatusError, is_hls_url, iter_hls
@@ -138,7 +139,9 @@ class _ProviderStream:
         self._response = None
 
     async def open(self):
-        self._http_session = aiohttp.ClientSession(timeout=PREVIEW_TIMEOUT)
+        self._http_session = aiohttp.ClientSession(
+            timeout=PREVIEW_TIMEOUT, headers=provider_request_headers()
+        )
         if is_hls_url(self._url):
             return await self._open_hls()
         self._response = await self._http_session.get(self._url)
@@ -442,7 +445,9 @@ async def preview_channel_stream(
     http_session = None
     provider_response = None
     try:
-        http_session = aiohttp.ClientSession(timeout=PREVIEW_TIMEOUT)
+        http_session = aiohttp.ClientSession(
+            timeout=PREVIEW_TIMEOUT, headers=provider_request_headers()
+        )
         provider_response = await http_session.get(stream_url)
         if provider_response.status != 200:
             raise HTTPException(
