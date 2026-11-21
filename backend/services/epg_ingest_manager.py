@@ -14,7 +14,7 @@ from typing import Dict, Iterable, Optional, Union
 from xml.etree.ElementTree import Element
 
 from defusedxml import ElementTree as ET
-from sqlalchemy import delete, select, func
+from sqlalchemy import delete, select, func, or_
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 from config import settings as app_settings
@@ -63,6 +63,12 @@ def _program_insert_stmt():
             ),
             "provider_stop": func.coalesce(
                 stmt.excluded.provider_stop, EPGProgram.provider_stop
+            ),
+            # The refresh that saw this row last; superseded rows are the ones
+            # it did not touch. COALESCE so an API backfill row, which carries
+            # no stamp, does not clear one an XMLTV refresh set.
+            "ingested_at": func.coalesce(
+                stmt.excluded.ingested_at, EPGProgram.ingested_at
             ),
         },
     )
@@ -514,6 +520,11 @@ class EPGIngestManager:
 
             now_utc = datetime.now(timezone.utc)
             earliest_start_by_channel: dict[str, datetime] = {}
+            # Every row this refresh writes is stamped with ingested_at, and
+            # the span of start times the file covers is kept per channel, so
+            # rows the file no longer lists can be pruned once it is all in.
+            ingested_at = now_utc.replace(tzinfo=None)
+            file_span_by_channel: dict[str, tuple[int, int]] = {}
 
             async with async_session_maker() as session:
                 async with session.begin():
@@ -608,6 +619,14 @@ class EPGIngestManager:
                             if existing_earliest is None or start_time < existing_earliest:
                                 earliest_start_by_channel[stream_id] = start_time
                         program["account_id"] = account.id
+                        program["ingested_at"] = ingested_at
+                        start_ts = program.get("start_timestamp")
+                        if isinstance(start_ts, int):
+                            span = file_span_by_channel.get(stream_id)
+                            file_span_by_channel[stream_id] = (
+                                (start_ts, start_ts) if span is None
+                                else (min(span[0], start_ts), max(span[1], start_ts))
+                            )
                         batch.append(program)
                         processed += 1
                         if processed % 500 == 0:
@@ -623,6 +642,19 @@ class EPGIngestManager:
 
                     if batch:
                         batch, inserted = await flush_batch(batch)
+
+                    # A force refresh already cleared the guide; a truncated
+                    # file lists only part of each channel, so pruning against
+                    # it would delete rows that are still current.
+                    if xmltv_parse_ok and not force and file_span_by_channel:
+                        pruned = await self._prune_superseded_programs(
+                            session, account.id, ingested_at, file_span_by_channel
+                        )
+                        if pruned:
+                            await self._log(
+                                f"Removed {pruned:,} guide entries the provider has retimed or dropped.",
+                                account=account,
+                            )
 
             backfill_targets: list[tuple[dict, datetime, int]] = []
             for channel in catchup_channels:
@@ -952,6 +984,51 @@ class EPGIngestManager:
                 exc,
             )
         return xmltv_to_stream, parse_ok
+
+    async def _prune_superseded_programs(
+        self,
+        session,
+        account_id: int,
+        ingested_at: datetime,
+        file_span_by_channel: Dict[str, tuple[int, int]],
+    ) -> int:
+        """Delete guide rows a clean XMLTV refresh has replaced.
+
+        A row's epg_id is channel:start:stop, so when the provider moves a
+        programme, the new timing is inserted as a new row and the old one
+        stays: the guide shows the programme twice, once at a time it no
+        longer airs. After a refresh, a row on a channel the file covered,
+        starting inside the span the file covered, that the refresh did not
+        write, is one the provider retimed or dropped. Rows outside the span
+        (older archive the file no longer lists) are kept.
+
+        Args:
+            session: The open session the refresh wrote through.
+            account_id: The account being refreshed.
+            ingested_at: The stamp this refresh wrote on every row (naive UTC).
+            file_span_by_channel: Per stream id, the earliest and latest
+                programme start timestamp the file listed.
+
+        Returns:
+            The number of rows deleted.
+        """
+        pruned = 0
+        async with session.begin():
+            for stream_id, (first_start, last_start) in file_span_by_channel.items():
+                result = await session.execute(
+                    delete(EPGProgram).where(
+                        EPGProgram.account_id == account_id,
+                        EPGProgram.channel_id == stream_id,
+                        EPGProgram.start_timestamp >= first_start,
+                        EPGProgram.start_timestamp <= last_start,
+                        or_(
+                            EPGProgram.ingested_at.is_(None),
+                            EPGProgram.ingested_at != ingested_at,
+                        ),
+                    )
+                )
+                pruned += max(result.rowcount or 0, 0)
+        return pruned
 
     def _iter_programs(
         self,

@@ -36,5 +36,10 @@ class EPGProgram(GuideMetadataColumns, Base):
     provider_stop: Mapped[str | None] = mapped_column(String(255), nullable=True)
     duration_minutes: Mapped[int] = mapped_column(Integer)
     has_archive: Mapped[bool] = mapped_column(Boolean, default=True)
+    # When an XMLTV refresh last wrote this row (naive UTC). A refresh that
+    # parses cleanly deletes rows on the same channel, inside the span its file
+    # covers, that it did not write: the provider retimed or dropped them, and
+    # epg_id (channel:start:stop) gave the new timing a row of its own.
+    ingested_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)

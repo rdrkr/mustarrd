@@ -64,6 +64,9 @@ async def _apply_lightweight_migrations(conn) -> None:
     if not await _column_exists(conn, "epg_programs", "provider_stop"):
         await conn.execute(text("ALTER TABLE epg_programs ADD COLUMN provider_stop VARCHAR(255)"))
 
+    if not await _column_exists(conn, "epg_programs", "ingested_at"):
+        await conn.execute(text("ALTER TABLE epg_programs ADD COLUMN ingested_at DATETIME"))
+
     # Structured guide metadata. The column list comes from guide_metadata so a
     # new field cannot be added to the model and forgotten here.
     for column_name, column_spec in metadata_column_ddl():
